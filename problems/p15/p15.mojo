@@ -30,6 +30,36 @@ fn axis_sum[
     batch = block_idx.y
     # FILL ME IN (roughly 15 lines)
 
+    shared = LayoutTensor[
+        dtype,
+        Layout.row_major(TPB),
+        MutAnyOrigin,
+        address_space = AddressSpace.SHARED,
+    ].stack_allocation()
+
+    if local_i < size:
+        shared[local_i] = a[batch, local_i]
+    else:
+        shared[local_i] = 0
+
+    barrier()
+
+    stride = UInt(TPB//2)
+
+    while stride > 0:
+
+        # no read, sync, write because threads do not overlap, so no race condition.
+        if local_i < stride:
+            shared[local_i] += shared[local_i + stride]
+
+        barrier()
+        stride//=2
+
+    if local_i == 0:
+        output[batch, 0] = shared[0]
+
+
+
 
 # ANCHOR_END: axis_sum
 
