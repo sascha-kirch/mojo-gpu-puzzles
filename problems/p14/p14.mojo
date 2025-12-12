@@ -25,6 +25,54 @@ fn prefix_sum_simple[
     global_i = block_dim.x * block_idx.x + thread_idx.x
     local_i = thread_idx.x
     # FILL ME IN (roughly 18 lines)
+    shared = LayoutTensor[
+        dtype,
+        Layout.row_major(TPB),
+        MutAnyOrigin,
+        address_space = AddressSpace.SHARED,
+    ].stack_allocation()
+
+    if global_i < size:
+        shared[local_i] = a[global_i]
+
+    barrier()
+
+    # My initial solution:
+    # ---------------------------------------------------------------------------
+    # Issues:
+    # - no read, sync, write pattern might cause race conditions!!!
+    # - no check that the local_i is < size
+    # - i use a while loop that checks conditions instead of a for loop that considers the log
+    # if global_i < size:
+    #     var step = 1
+
+    #     while step <= Int(size/2):
+    #         # update share memory
+    #         if local_i > step:
+    #             shared[local_i] += shared[local_i - step]
+
+    #         barrier()
+    #         step *= 2
+
+    # ---------------------------------------------------------------------------
+    # Version considering solution:
+    var step = UInt(1)
+    for i in range(Int(log2(Scalar[dtype](TPB)))):
+        var current_val: output.element_type = 0
+
+        if local_i >= step and local_i < size:
+            current_val = shared[local_i - step] # read
+        barrier()
+
+        if local_i >= step and local_i < size:
+            shared[local_i] += current_val # write
+        barrier()
+
+        step *= 2
+
+    # ---------------------------------------------------------------------------
+    # write processed shared memory back to output tensor
+    output[global_i] = shared[local_i]
 
 
 # ANCHOR_END: prefix_sum_simple
@@ -49,6 +97,42 @@ fn prefix_sum_local_phase[
     global_i = block_dim.x * block_idx.x + thread_idx.x
     local_i = thread_idx.x
     # FILL ME IN (roughly 20 lines)
+    shared = LayoutTensor[
+        dtype,
+        Layout.row_major(TPB),
+        MutAnyOrigin,
+        address_space = AddressSpace.SHARED,
+    ].stack_allocation()
+
+    if global_i < size:
+        shared[local_i] = a[global_i]
+
+    barrier()
+
+    var step = UInt(1)
+
+    @parameter
+    for i in range(Int(log2(Scalar[dtype](TPB)))):
+        var current_val: output.element_type = 0
+
+        if local_i >= step and local_i < TPB:
+            current_val = shared[local_i - step] # read
+        barrier()
+
+        if local_i >= step and local_i < TPB:
+            shared[local_i] += current_val # write
+        barrier()
+
+        step *= 2
+
+    # write data block
+    if global_i < size:
+        output[global_i] = shared[local_i]
+
+    # write block sum into extended buffer
+    if local_i == TPB - 1:
+        idx_block_sum = size + block_idx.x
+        output[idx_block_sum] = shared[local_i]
 
 
 # Kernel 2: Add block sums to their respective blocks
@@ -57,7 +141,9 @@ fn prefix_sum_block_sum_phase[
 ](output: LayoutTensor[dtype, layout, MutAnyOrigin], size: UInt):
     global_i = block_dim.x * block_idx.x + thread_idx.x
     # FILL ME IN (roughly 3 lines)
-
+    if global_i < size and block_idx.x > 0:
+        idx_prev_block_sum = size + block_idx.x - 1
+        output[global_i] += output[idx_prev_block_sum]
 
 # ANCHOR_END: prefix_sum_complete
 
