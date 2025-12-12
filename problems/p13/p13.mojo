@@ -26,8 +26,51 @@ fn conv_1d_simple[
 ):
     global_i = block_dim.x * block_idx.x + thread_idx.x
     local_i = Int(thread_idx.x)
-    # FILL ME IN (roughly 14 lines)
 
+    # FILL ME IN (roughly 14 lines)
+    shared = LayoutTensor[
+        dtype,
+        Layout.row_major(TPB),
+        MutAnyOrigin,
+        address_space = AddressSpace.SHARED,
+    ].stack_allocation()
+
+    kernel = LayoutTensor[
+        dtype,
+        Layout.row_major(CONV),
+        MutAnyOrigin,
+        address_space = AddressSpace.SHARED,
+    ].stack_allocation()
+
+    if global_i < SIZE:
+        shared[local_i] = a[global_i]
+
+    if global_i < CONV:
+        kernel[local_i] = b[global_i]
+
+    barrier()
+
+    # my initial attempt was as follows:
+    # bad because:
+    # - directly adding to output in place assumes 0 initialized!
+    # - no global guard, so all threads loop over the range(SIZE) even if not contributing to the output
+    # - no guard checking the local_i
+
+    # for c in range(CONV):
+    #     if global_i + UInt(c) < SIZE:
+    #         output[global_i] += shared[local_i+c] * kernel[c]
+
+    # adapted to solution of puzzle.
+    if global_i < SIZE:
+        var local_sum: output.element_type = 0
+
+        # parameter decorator unrolls the for loop at compile time
+        @parameter
+        for c in range(CONV):
+            if local_i + c < SIZE:
+                local_sum += shared[local_i+c] * kernel[c]
+
+        output[global_i] = local_sum
 
 # ANCHOR_END: conv_1d_simple
 
@@ -51,7 +94,49 @@ fn conv_1d_block_boundary[
     global_i = Int(block_dim.x * block_idx.x + thread_idx.x)
     local_i = Int(thread_idx.x)
     # FILL ME IN (roughly 18 lines)
+    shared = LayoutTensor[
+        dtype,
+        Layout.row_major(TPB + CONV_2 - 1), # add some extra space to handle boundry and load date from next block
+        MutAnyOrigin,
+        address_space = AddressSpace.SHARED,
+    ].stack_allocation()
 
+    kernel = LayoutTensor[
+        dtype,
+        Layout.row_major(CONV_2),
+        MutAnyOrigin,
+        address_space = AddressSpace.SHARED,
+    ].stack_allocation()
+
+    if global_i < SIZE_2:
+        shared[local_i] = a[global_i]
+    else:
+        shared[local_i] = 0
+
+    # handle case where we need to store data from next block in current block to deal with the boundry
+    # we choose that that the first 3 threads will load not only the main data but also the boundry region.
+    if local_i < CONV_2 -1:
+        next_idx = global_i + TPB
+        if next_idx < SIZE_2:
+            shared[TPB + local_i] = a[next_idx]
+        else:
+            shared[TPB + local_i] = 0
+
+    if local_i < CONV_2:
+        kernel[local_i] = b[local_i]
+
+    barrier()
+
+    if global_i < SIZE_2:
+        var local_sum: output.element_type = 0
+
+        # parameter decorator unrolls the for loop at compile time
+        @parameter
+        for c in range(CONV_2):
+            if global_i + c < SIZE_2:
+                local_sum += shared[local_i+c] * kernel[c]
+
+        output[global_i] = local_sum
 
 # ANCHOR_END: conv_1d_block_boundary
 

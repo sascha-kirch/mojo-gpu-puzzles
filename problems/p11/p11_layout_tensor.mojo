@@ -31,6 +31,20 @@ fn pooling[
     global_i = block_dim.x * block_idx.x + thread_idx.x
     local_i = thread_idx.x
     # FIX ME IN (roughly 10 lines)
+    if global_i < size:
+        shared[local_i] = a[global_i]
+
+    barrier()
+
+    running_sum:Float32 = 0.0
+
+    window_size = min(global_i, 3)
+
+    for w in range(window_size):
+        i = local_i - UInt(w)
+        running_sum += shared[i][0]
+
+    output[global_i] = running_sum
 
 
 # ANCHOR_END: pooling_layout_tensor

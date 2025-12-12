@@ -27,6 +27,18 @@ fn pooling(
     local_i = thread_idx.x
     # FILL ME IN (roughly 10 lines)
 
+    if global_i < size:
+        shared[local_i] = a[global_i]
+
+    barrier()
+
+    running_sum:Scalar[dtype] = 0.0
+
+    window_size = min(global_i, 3)
+    for w in range(window_size):
+        running_sum += shared[local_i - UInt(w)]
+
+    output[global_i] = running_sum
 
 # ANCHOR_END: pooling
 
