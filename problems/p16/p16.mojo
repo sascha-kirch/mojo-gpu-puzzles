@@ -27,6 +27,15 @@ fn naive_matmul[
     col = block_dim.x * block_idx.x + thread_idx.x
     # FILL ME IN (roughly 6 lines)
 
+    if row < size and col < size:
+        var c:output.element_type = 0.0
+
+        @parameter
+        for i in range(size):
+            c += a[row, i] * b[i,col]
+
+        output[row,col] = c
+
 
 # ANCHOR_END: naive_matmul
 
@@ -45,6 +54,35 @@ fn single_block_matmul[
     local_col = thread_idx.x
     # FILL ME IN (roughly 12 lines)
 
+    shared_a = LayoutTensor[
+        dtype,
+        Layout.row_major(TPB, TPB),
+        MutAnyOrigin,
+        address_space = AddressSpace.SHARED,
+    ].stack_allocation()
+
+    shared_b = LayoutTensor[
+        dtype,
+        Layout.row_major(TPB, TPB),
+        MutAnyOrigin,
+        address_space = AddressSpace.SHARED,
+    ].stack_allocation()
+
+    if row < size and col < size:
+        shared_a[local_row,local_col] = a[row, col]
+        shared_b[local_row,local_col] = b[row, col]
+
+    barrier()
+
+    if row < size and col < size:
+        var c:output.element_type = 0.0
+
+        @parameter
+        for i in range(size):
+            c += shared_a[local_row, i] * shared_b[i, local_col]
+
+        output[row,col] = c
+
 
 # ANCHOR_END: single_block_matmul
 
@@ -62,12 +100,65 @@ fn matmul_tiled[
     a: LayoutTensor[dtype, layout_tiled, ImmutAnyOrigin],
     b: LayoutTensor[dtype, layout_tiled, ImmutAnyOrigin],
 ):
+    # indices in the current block (tile 3x3)
     local_row = thread_idx.y
     local_col = thread_idx.x
+    # indices over tile boundries (current row or col of entire 9x9 matrix)
     tiled_row = block_idx.y * TPB + thread_idx.y
     tiled_col = block_idx.x * TPB + thread_idx.x
     # FILL ME IN (roughly 20 lines)
 
+    shared_a = LayoutTensor[
+        dtype,
+        Layout.row_major(TPB, TPB), # [3x3]
+        MutAnyOrigin,
+        address_space = AddressSpace.SHARED,
+    ].stack_allocation()
+
+    shared_b = LayoutTensor[
+        dtype,
+        Layout.row_major(TPB, TPB), # [3x3]
+        MutAnyOrigin,
+        address_space = AddressSpace.SHARED,
+    ].stack_allocation()
+
+    # each thread computes a single entry in c
+    # c is also a register value for each individual thread meaning accumulating this value is fast!
+    var c:output.element_type = 0.0
+
+    comptime num_tiles = (size + TPB - 1) // TPB #(9 + 3 - 1) // 3 = 11 // 3 = 3
+    # => each entry in c requires the results from 3 tiles.
+
+    @parameter
+    for tile in range(num_tiles):
+
+        # fill shared memory with current tiles (rows from a and cols from b)
+        # each tile is associated with a single block
+        global_idx_col = tile * TPB + local_col
+        global_idx_row = tile * TPB + local_row
+
+        if tiled_row < size and global_idx_col < size:
+            shared_a[local_row, local_col] = a[tiled_row, global_idx_col]
+
+        if tiled_col < size and global_idx_row < size:
+            # note how shared_b has same shape as shared_a so we have coalesced memory access!!
+            shared_b[local_row, local_col] = b[global_idx_row, tiled_col]
+
+        barrier()
+        # => at this point we have 3x3 shared memory tiles for input a and 3x3 shared memory tiles for input b.
+
+        if tiled_row < size and tiled_col < size:
+
+            # accumulate results from all tiles involved from a and b to obtain current output c
+            @parameter
+            for k in range(min(TPB, size - tile*TPB)): # min(3, 9 - {0,1,2}*3)
+                c += shared_a[local_row, k] * shared_b[k, local_col]
+
+        barrier()
+
+
+    if tiled_row < size and tiled_col < size:
+        output[tiled_row, tiled_col] = c
 
 # ANCHOR_END: matmul_tiled
 
